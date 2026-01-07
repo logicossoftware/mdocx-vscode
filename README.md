@@ -1,6 +1,6 @@
 # MDOCX for VS Code
 
-[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/logicos.mdocx-vscode?label=Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=logicos.mdocx-vscode)
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/logicossoftware.mdocx-vscode?label=Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=logicossoftware.mdocx-vscode)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > **Preview, edit, and manage MDOCX files directly in Visual Studio Code.**

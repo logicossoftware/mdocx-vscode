@@ -2,10 +2,10 @@
   "name": "mdocx-vscode",
   "displayName": "MDOCX",
   "description": "Preview, edit, and manage MDOCX (MarkDown Open Container eXchange) files in VS Code.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "logicossoftware",
   "author": {
-    "name": "Logicos Software"
+    "name": "MHJ Wiggers / Logicos Software"
   },
   "license": "MIT",
   "icon": "images/icon.png",
