@@ -2,10 +2,18 @@
 src/**
 **/*.map
 **/*.ts
+!out/**/*.js
 node_modules/**
+
+# Build files
+esbuild.mjs
+tsconfig.json
 
 # Project docs
 AGENTS.md
 
 # Dev scripts
 scripts/**
+
+# Local builds
+*.vsix

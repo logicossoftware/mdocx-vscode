@@ -2,7 +2,7 @@
   "name": "mdocx-vscode",
   "displayName": "MDOCX",
   "description": "Preview, edit, and manage MDOCX (MarkDown Open Container eXchange) files in VS Code.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "logicossoftware",
   "author": {
     "name": "MHJ Wiggers / Logicos Software"
@@ -64,15 +64,17 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "node esbuild.mjs",
+    "compile:tsc": "tsc -p ./",
+    "watch": "node esbuild.mjs --watch",
     "sample:generate": "node ./scripts/generate-sample.mjs",
     "lint": "node ./scripts/noop-lint.js",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile -- --production"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.92.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.7.3"
   },
   "dependencies": {
