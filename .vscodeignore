@@ -1,0 +1,11 @@
+.vscode/**
+src/**
+**/*.map
+**/*.ts
+node_modules/**
+
+# Project docs
+AGENTS.md
+
+# Dev scripts
+scripts/**

@@ -1,0 +1,82 @@
+{
+  "name": "mdocx-vscode",
+  "displayName": "MDOCX",
+  "description": "Preview, edit, and manage MDOCX (MarkDown Open Container eXchange) files in VS Code.",
+  "version": "0.0.1",
+  "publisher": "logicossoftware",
+  "author": {
+    "name": "Logicos Software"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/logicossoftware/mdocx-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/logicossoftware/mdocx-vscode/issues"
+  },
+  "homepage": "https://github.com/logicossoftware/mdocx-vscode#readme",
+  "keywords": [
+    "mdocx",
+    "markdown",
+    "preview",
+    "container",
+    "document",
+    "media"
+  ],
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "preview": true,
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "MDOCX",
+      "properties": {
+        "mdocx.maxInlineMediaBytes": {
+          "type": "number",
+          "default": 26214400,
+          "minimum": 1,
+          "description": "Maximum size (bytes) of a single embedded media item to inline into the preview as a data URI. Larger items will not be inlined." 
+        }
+      }
+    },
+    "customEditors": [
+      {
+        "viewType": "mdocx.preview",
+        "displayName": "MDOCX Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.mdocx"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "sample:generate": "node ./scripts/generate-sample.mjs",
+    "lint": "node ./scripts/noop-lint.js",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "marked": "^12.0.2",
+    "ts-mdocx": "^0.2.0"
+  }
+}
