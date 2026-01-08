@@ -10,10 +10,16 @@ type RenderRequestMessage =
   | { type: 'select'; path: string }
   | { type: 'copy'; path?: string }
   | { type: 'edit'; path?: string }
+  | { type: 'editExternal'; path?: string }
+  | { type: 'saveContent'; path: string; content: string }
   | { type: 'saveMetadata'; metadata: MetadataFields }
   | { type: 'addMedia' }
   | { type: 'removeMedia'; id: string }
-  | { type: 'replaceMedia'; id: string };
+  | { type: 'replaceMedia'; id: string }
+  | { type: 'addMarkdown' }
+  | { type: 'renameMarkdown'; oldPath: string; newPath: string }
+  | { type: 'deleteMarkdown'; path: string }
+  | { type: 'getMarkdownContent'; path: string };
 
 type MetadataFields = {
   title?: string;
@@ -37,6 +43,7 @@ type RenderResponseMessage = {
   title?: string;
   description?: string;
   html: string;
+  markdown?: string;
   error?: string;
   fileList: string[];
   metadata?: MetadataFields;
@@ -120,6 +127,12 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       }
 
       if (message.type === 'edit') {
+        // Edit mode is now handled in the webview - this is kept for backwards compatibility
+        // The webview will request markdown content via getMarkdownContent
+        return;
+      }
+
+      if (message.type === 'editExternal') {
         const pathToEdit = typeof message.path === 'string' && message.path.length > 0 ? message.path : selectedPath;
         if (!pathToEdit) {
           void vscode.window.showWarningMessage('MDOCX: No markdown file selected to edit.');
@@ -127,6 +140,33 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         }
         const editUri = MdocxFileSystemProvider.buildUri(document.uri, pathToEdit);
         await vscode.window.showTextDocument(editUri, { preview: false });
+        return;
+      }
+
+      if (message.type === 'getMarkdownContent') {
+        const pathToGet = message.path;
+        if (!pathToGet) {
+          return;
+        }
+        const text = await this.getMarkdownText(document.uri, pathToGet);
+        await webviewPanel.webview.postMessage({
+          type: 'markdownContent',
+          path: pathToGet,
+          content: text || ''
+        });
+        return;
+      }
+
+      if (message.type === 'saveContent') {
+        const pathToSave = message.path;
+        const content = message.content;
+        if (!pathToSave) {
+          void vscode.window.showWarningMessage('MDOCX: No file path specified.');
+          return;
+        }
+        await this.saveMarkdownContent(document.uri, pathToSave, content);
+        void vscode.window.showInformationMessage('MDOCX: File saved.');
+        await postRender(selectedPath);
         return;
       }
 
@@ -182,6 +222,57 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
           void vscode.window.showInformationMessage('MDOCX: Media replaced.');
           await postRender(selectedPath);
         }
+        return;
+      }
+
+      if (message.type === 'addMarkdown') {
+        const fileName = await vscode.window.showInputBox({
+          prompt: 'Enter the path for the new markdown file',
+          value: 'new-file.md',
+          validateInput: (value) => {
+            if (!value || value.trim().length === 0) {
+              return 'File name cannot be empty';
+            }
+            if (!value.endsWith('.md') && !value.endsWith('.markdown')) {
+              return 'File must have .md or .markdown extension';
+            }
+            return undefined;
+          }
+        });
+        if (fileName) {
+          await this.addMarkdownFile(document.uri, fileName);
+          void vscode.window.showInformationMessage(`MDOCX: Added ${fileName}`);
+          selectedPath = fileName;
+          await postRender(selectedPath);
+        }
+        return;
+      }
+
+      if (message.type === 'renameMarkdown') {
+        await this.renameMarkdownFile(document.uri, message.oldPath, message.newPath);
+        void vscode.window.showInformationMessage(`MDOCX: Renamed to ${message.newPath}`);
+        if (selectedPath === message.oldPath) {
+          selectedPath = message.newPath;
+        }
+        await postRender(selectedPath);
+        return;
+      }
+
+      if (message.type === 'deleteMarkdown') {
+        const confirm = await vscode.window.showWarningMessage(
+          `Delete "${message.path}" from MDOCX? This cannot be undone.`,
+          { modal: true },
+          'Delete'
+        );
+        if (confirm === 'Delete') {
+          await this.deleteMarkdownFile(document.uri, message.path);
+          void vscode.window.showInformationMessage('MDOCX: File deleted.');
+          if (selectedPath === message.path) {
+            selectedPath = undefined;
+          }
+          await postRender(selectedPath);
+        }
+        return;
       }
     });
 
@@ -299,6 +390,7 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         title,
         description,
         html,
+        markdown: markdownText,
         fileList,
         metadata,
         mediaItems
@@ -338,6 +430,35 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     } catch {
       return undefined;
     }
+  }
+
+  private async saveMarkdownContent(resource: vscode.Uri, filePath: string, content: string): Promise<void> {
+    const bytes = await vscode.workspace.fs.readFile(resource);
+    const { readMdocx, writeMdocxAsync } = await import('ts-mdocx');
+    const doc = await readMdocx(bytes);
+
+    // Defensive normalization
+    doc.markdown = doc.markdown || { files: [] };
+    if (!Array.isArray(doc.markdown.files)) doc.markdown.files = [];
+    doc.media = doc.media || { items: [] };
+    if (!Array.isArray(doc.media.items)) doc.media.items = [];
+
+    const file = doc.markdown.files.find((f: { path: string }) => f.path === filePath);
+    if (!file) {
+      throw new Error(`File "${filePath}" not found in this MDOCX`);
+    }
+
+    // Update the content
+    const encoder = new TextEncoder();
+    file.content = encoder.encode(content);
+
+    const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
+      metadata: doc.metadata,
+      markdownCompression: 'zip',
+      mediaCompression: 'zip'
+    });
+
+    await vscode.workspace.fs.writeFile(resource, newBytes);
   }
 
   private async saveMetadata(resource: vscode.Uri, metadata: MetadataFields): Promise<void> {
@@ -395,6 +516,110 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
         mimeType,
         data: new Uint8Array(data)
       });
+    }
+
+    const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
+      metadata: doc.metadata,
+      markdownCompression: 'zip',
+      mediaCompression: 'zip'
+    });
+
+    await vscode.workspace.fs.writeFile(resource, newBytes);
+  }
+
+  private async addMarkdownFile(resource: vscode.Uri, filePath: string): Promise<void> {
+    const bytes = await vscode.workspace.fs.readFile(resource);
+    const { readMdocx, writeMdocxAsync } = await import('ts-mdocx');
+    const doc = await readMdocx(bytes);
+
+    // Defensive normalization
+    doc.markdown = doc.markdown || { files: [] };
+    if (!Array.isArray(doc.markdown.files)) doc.markdown.files = [];
+    doc.media = doc.media || { items: [] };
+    if (!Array.isArray(doc.media.items)) doc.media.items = [];
+
+    // Check if file already exists
+    const existing = doc.markdown.files.find((f: { path: string }) => f.path === filePath);
+    if (existing) {
+      throw new Error(`File "${filePath}" already exists in this MDOCX`);
+    }
+
+    // Create default content
+    const fileName = path.basename(filePath, path.extname(filePath));
+    const defaultContent = `# ${fileName}\n\nStart writing here...\n`;
+    const encoder = new TextEncoder();
+
+    doc.markdown.files.push({
+      path: filePath,
+      content: encoder.encode(defaultContent)
+    });
+
+    const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
+      metadata: doc.metadata,
+      markdownCompression: 'zip',
+      mediaCompression: 'zip'
+    });
+
+    await vscode.workspace.fs.writeFile(resource, newBytes);
+  }
+
+  private async renameMarkdownFile(resource: vscode.Uri, oldPath: string, newPath: string): Promise<void> {
+    const bytes = await vscode.workspace.fs.readFile(resource);
+    const { readMdocx, writeMdocxAsync } = await import('ts-mdocx');
+    const doc = await readMdocx(bytes);
+
+    // Defensive normalization
+    doc.markdown = doc.markdown || { files: [] };
+    if (!Array.isArray(doc.markdown.files)) doc.markdown.files = [];
+    doc.media = doc.media || { items: [] };
+    if (!Array.isArray(doc.media.items)) doc.media.items = [];
+
+    const file = doc.markdown.files.find((f: { path: string }) => f.path === oldPath);
+    if (!file) {
+      throw new Error(`File "${oldPath}" not found in this MDOCX`);
+    }
+
+    // Check if new path already exists
+    const existing = doc.markdown.files.find((f: { path: string }) => f.path === newPath);
+    if (existing) {
+      throw new Error(`File "${newPath}" already exists in this MDOCX`);
+    }
+
+    file.path = newPath;
+
+    // Update root path if it was pointing to the old file
+    if (doc.markdown.rootPath === oldPath) {
+      doc.markdown.rootPath = newPath;
+    }
+
+    const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
+      metadata: doc.metadata,
+      markdownCompression: 'zip',
+      mediaCompression: 'zip'
+    });
+
+    await vscode.workspace.fs.writeFile(resource, newBytes);
+  }
+
+  private async deleteMarkdownFile(resource: vscode.Uri, filePath: string): Promise<void> {
+    const bytes = await vscode.workspace.fs.readFile(resource);
+    const { readMdocx, writeMdocxAsync } = await import('ts-mdocx');
+    const doc = await readMdocx(bytes);
+
+    // Defensive normalization
+    doc.markdown = doc.markdown || { files: [] };
+    if (!Array.isArray(doc.markdown.files)) doc.markdown.files = [];
+    doc.media = doc.media || { items: [] };
+    if (!Array.isArray(doc.media.items)) doc.media.items = [];
+
+    const index = doc.markdown.files.findIndex((f: { path: string }) => f.path === filePath);
+    if (index >= 0) {
+      doc.markdown.files.splice(index, 1);
+    }
+
+    // Update root path if it was pointing to deleted file
+    if (doc.markdown.rootPath === filePath && doc.markdown.files.length > 0) {
+      doc.markdown.rootPath = doc.markdown.files[0].path;
     }
 
     const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
@@ -676,7 +901,12 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
   <style>
     :root {
       color-scheme: light dark;
+      --border-color: var(--vscode-editorGroup-border);
+      --panel-bg: color-mix(in srgb, var(--vscode-editor-background) 92%, black);
+      --panel-hover-bg: color-mix(in srgb, var(--vscode-editor-background) 85%, black);
+      --danger-bg: var(--vscode-inputValidation-errorBackground, #5a1d1d);
     }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       padding: 0;
@@ -687,15 +917,18 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     header {
       position: sticky;
       top: 0;
-      z-index: 2;
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--vscode-editorGroup-border);
+      z-index: 10;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
       background: var(--vscode-editor-background);
       display: flex;
-      gap: 10px;
+      gap: 12px;
       align-items: center;
+      flex-wrap: wrap;
     }
     header .meta {
+      flex: 1;
+      min-width: 200px;
       display: flex;
       flex-direction: column;
       gap: 2px;
@@ -703,35 +936,46 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     }
     header .meta .title {
       font-weight: 600;
+      font-size: 14px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     header .meta .desc {
-      opacity: 0.8;
+      opacity: 0.7;
       font-size: 12px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    select {
-      min-width: 240px;
-      max-width: 50vw;
+    select, input, textarea {
+      padding: 6px 10px;
+      border: 1px solid var(--vscode-input-border, var(--border-color));
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 4px;
+      font-family: var(--vscode-font-family);
+      font-size: 13px;
+    }
+    select:focus, input:focus, textarea:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
     }
     button {
       border: 1px solid var(--vscode-button-border, transparent);
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
-      padding: 3px 8px;
-      border-radius: 6px;
+      padding: 6px 12px;
+      border-radius: 4px;
       cursor: pointer;
       font-family: var(--vscode-font-family);
       font-size: 12px;
-      line-height: 1;
+      font-weight: 500;
       display: inline-flex;
       align-items: center;
       gap: 6px;
       white-space: nowrap;
+      transition: background 0.1s;
     }
     button svg {
       width: 14px;
@@ -742,124 +986,216 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
     button:hover {
       background: var(--vscode-button-hoverBackground);
     }
-    main {
-      padding: 18px 22px;
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
-    main img {
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    button.secondary:hover {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+    button.active {
+      background: var(--vscode-button-hoverBackground);
+      box-shadow: inset 0 0 0 1px var(--vscode-focusBorder);
+    }
+    button.danger {
+      background: var(--danger-bg);
+    }
+    button.small {
+      padding: 3px 8px;
+      font-size: 11px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: calc(100vh - 60px);
+    }
+    @media (max-width: 800px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        border-right: none !important;
+        border-bottom: 1px solid var(--border-color);
+      }
+    }
+    .sidebar {
+      border-right: 1px solid var(--border-color);
+      background: var(--panel-bg);
+      overflow-y: auto;
+      max-height: calc(100vh - 60px);
+    }
+    .main-content {
+      padding: 20px 24px;
+      overflow-y: auto;
+      max-height: calc(100vh - 60px);
+      display: flex;
+      flex-direction: column;
+    }
+    .main-content img {
       max-width: 100%;
     }
-    main pre {
+    .main-content pre {
       padding: 12px;
       overflow: auto;
-      background: color-mix(in srgb, var(--vscode-editor-background) 85%, black);
-      border: 1px solid var(--vscode-editorGroup-border);
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
       border-radius: 6px;
     }
-    main code {
+    .main-content code {
       font-family: var(--vscode-editor-font-family);
     }
+    .main-content h1:first-child { margin-top: 0; }
     .error {
       color: var(--vscode-errorForeground);
-      padding: 10px 12px;
+      padding: 12px 16px;
       border: 1px solid var(--vscode-errorForeground);
       border-radius: 6px;
       margin: 12px 0;
       white-space: pre-wrap;
     }
-    .panel {
-      margin: 12px 0;
-      border: 1px solid var(--vscode-editorGroup-border);
-      border-radius: 6px;
-      overflow: hidden;
+    
+    /* Sidebar sections */
+    .sidebar-section {
+      border-bottom: 1px solid var(--border-color);
     }
-    .panel-header {
+    .sidebar-section:last-child {
+      border-bottom: none;
+    }
+    .section-header {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      background: color-mix(in srgb, var(--vscode-editor-background) 90%, black);
+      justify-content: space-between;
+      padding: 10px 12px;
       cursor: pointer;
       user-select: none;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      opacity: 0.8;
     }
-    .panel-header:hover {
-      background: color-mix(in srgb, var(--vscode-editor-background) 80%, black);
+    .section-header:hover {
+      background: var(--panel-hover-bg);
     }
-    .panel-header .chevron {
+    .section-header .chevron {
       width: 12px;
       height: 12px;
       fill: currentColor;
       transition: transform 0.15s;
     }
-    .panel-header.collapsed .chevron {
+    .section-header.collapsed .chevron {
       transform: rotate(-90deg);
     }
-    .panel-header h3 {
-      margin: 0;
-      font-size: 13px;
-      font-weight: 600;
-    }
-    .panel-body {
-      padding: 12px;
-    }
-    .panel-header.collapsed + .panel-body {
+    .section-header.collapsed + .section-body {
       display: none;
     }
-    .form-row {
+    .section-body {
+      padding: 8px 12px 12px;
+    }
+    .section-actions {
       display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin-bottom: 12px;
+      gap: 6px;
+      margin-bottom: 10px;
     }
-    .form-row label {
-      font-size: 12px;
-      opacity: 0.8;
+
+    /* File list */
+    .file-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
     }
-    .form-row input, .form-row textarea {
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       padding: 6px 8px;
-      border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-      background: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
       border-radius: 4px;
-      font-family: var(--vscode-font-family);
+      cursor: pointer;
       font-size: 13px;
     }
-    .form-row textarea {
-      min-height: 60px;
-      resize: vertical;
+    .file-item:hover {
+      background: var(--panel-hover-bg);
     }
+    .file-item.selected {
+      background: var(--vscode-list-activeSelectionBackground);
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+    .file-item .file-icon {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+      opacity: 0.7;
+      flex-shrink: 0;
+    }
+    .file-item .file-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-item .file-actions {
+      display: none;
+      gap: 4px;
+    }
+    .file-item:hover .file-actions {
+      display: flex;
+    }
+    .file-item .file-actions button {
+      padding: 2px 4px;
+      background: transparent;
+      border: none;
+      opacity: 0.7;
+    }
+    .file-item .file-actions button:hover {
+      opacity: 1;
+      background: var(--panel-hover-bg);
+    }
+    .file-item.root-file .file-name::after {
+      content: ' (root)';
+      opacity: 0.5;
+      font-size: 11px;
+    }
+
+    /* Media grid */
     .media-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 8px;
     }
     .media-item {
-      border: 1px solid var(--vscode-editorGroup-border);
+      border: 1px solid var(--border-color);
       border-radius: 6px;
       padding: 8px;
       text-align: center;
-      position: relative;
+      background: var(--vscode-editor-background);
     }
     .media-item img {
       max-width: 100%;
-      max-height: 80px;
+      max-height: 60px;
       object-fit: contain;
       margin-bottom: 6px;
+      border-radius: 2px;
     }
     .media-item .placeholder {
       width: 100%;
-      height: 60px;
+      height: 50px;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: color-mix(in srgb, var(--vscode-editor-background) 85%, black);
+      background: var(--panel-bg);
       border-radius: 4px;
       margin-bottom: 6px;
-      font-size: 11px;
+      font-size: 10px;
       opacity: 0.6;
     }
     .media-item .info {
-      font-size: 11px;
+      font-size: 10px;
       word-break: break-all;
+      opacity: 0.8;
     }
     .media-item .actions {
       margin-top: 6px;
@@ -867,220 +1203,307 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       gap: 4px;
       justify-content: center;
     }
-    .media-item button {
-      padding: 2px 6px;
+
+    /* Form elements */
+    .form-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .form-row:last-child {
+      margin-bottom: 0;
+    }
+    .form-row label {
       font-size: 11px;
+      opacity: 0.7;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .form-row textarea {
+      min-height: 50px;
+      resize: vertical;
     }
     .btn-row {
       display: flex;
       gap: 8px;
-      margin-top: 12px;
+      margin-top: 10px;
+    }
+
+    /* Empty state */
+    .empty-state {
+      text-align: center;
+      padding: 20px;
+      opacity: 0.6;
+      font-size: 12px;
+    }
+
+    /* Badge */
+    .badge {
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 10px;
+      margin-left: 6px;
+    }
+
+    /* View toggle */
+    .view-toggle {
+      display: flex;
+      border: 1px solid var(--vscode-button-border, var(--border-color));
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .view-toggle button {
+      border: none;
+      border-radius: 0;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .view-toggle button:first-child {
+      border-right: 1px solid var(--vscode-button-border, var(--border-color));
+    }
+    .view-toggle button.active {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      box-shadow: none;
+    }
+    .view-toggle button:hover:not(.active) {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    /* Editor view */
+    #previewView {
+      flex: 1;
+    }
+    #editorView {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #editorView.active {
+      display: flex;
+    }
+    #previewView.hidden {
+      display: none;
+    }
+    .editor-toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .editor-toolbar .file-path {
+      flex: 1;
+      font-size: 12px;
+      opacity: 0.8;
+      font-family: var(--vscode-editor-font-family);
+    }
+    .editor-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    #markdownEditor {
+      flex: 1;
+      width: 100%;
+      min-height: 400px;
+      padding: 12px;
+      border: 1px solid var(--vscode-input-border, var(--border-color));
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 6px;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 13px;
+      line-height: 1.5;
+      resize: none;
+      tab-size: 2;
+    }
+    #markdownEditor:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    .editor-status {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 8px;
+      font-size: 11px;
+      opacity: 0.7;
+    }
+    .editor-status .modified {
+      color: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
+    }
+    .editor-actions {
+      display: flex;
+      gap: 8px;
     }
   </style>
 </head>
 <body>
   <header>
-    <select id="fileSelect" aria-label="MDOCX markdown file"></select>
-    <button id="copyBtn" type="button" title="Copy Markdown to Clipboard" aria-label="Copy Markdown to Clipboard">
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path d="M10 1H3.5A1.5 1.5 0 0 0 2 2.5V10h1V2.5a.5.5 0 0 1 .5-.5H10V1z"/>
-        <path d="M5.5 4H12A2 2 0 0 1 14 6v6.5A2 2 0 0 1 12 14H5.5A2 2 0 0 1 3.5 12.5V6A2 2 0 0 1 5.5 4zm0 1A1 1 0 0 0 4.5 6v6.5a1 1 0 0 0 1 1H12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H5.5z"/>
-      </svg>
-      Copy
-    </button>
-    <button id="editBtn" type="button" title="Edit Markdown" aria-label="Edit Markdown">
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.638-.638l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5zM11.207 2L3 10.207V10.5a.5.5 0 0 0 .5.5h.293L12 2.793 11.207 2zM2.5 12.5l-.646.647.793 2.121 2.121.793.647-.646L2.5 12.5z"/>
-      </svg>
-      Edit
-    </button>
     <div class="meta">
       <div id="docTitle" class="title">MDOCX</div>
       <div id="docDesc" class="desc"></div>
     </div>
+    <div class="view-toggle">
+      <button id="previewToggle" type="button" class="active" title="Preview Mode">
+        <svg viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
+        Preview
+      </button>
+      <button id="editToggle" type="button" title="Edit Mode">
+        <svg viewBox="0 0 16 16"><path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.638-.638l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/></svg>
+        Edit
+      </button>
+    </div>
+    <button id="copyBtn" type="button" class="secondary" title="Copy Markdown to Clipboard">
+      <svg viewBox="0 0 16 16"><path d="M10 1H3.5A1.5 1.5 0 0 0 2 2.5V10h1V2.5a.5.5 0 0 1 .5-.5H10V1z"/><path d="M5.5 4H12A2 2 0 0 1 14 6v6.5A2 2 0 0 1 12 14H5.5A2 2 0 0 1 3.5 12.5V6A2 2 0 0 1 5.5 4zm0 1A1 1 0 0 0 4.5 6v6.5a1 1 0 0 0 1 1H12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H5.5z"/></svg>
+      Copy
+    </button>
+    <button id="editExternalBtn" type="button" class="secondary" title="Edit in VS Code Editor">
+      <svg viewBox="0 0 16 16"><path d="M4.5 1a.5.5 0 0 0-.5.5v13a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V4.207L10.793 1H4.5z"/><path d="M10 1v3.5a.5.5 0 0 0 .5.5H14"/></svg>
+      Open in Editor
+    </button>
   </header>
-  <main>
-    <div id="error" class="error" style="display:none"></div>
 
-    <!-- Metadata Panel -->
-    <div class="panel">
-      <div class="panel-header collapsed" id="metadataHeader">
-        <svg class="chevron" viewBox="0 0 16 16"><path d="M6 12l4-4-4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
-        <h3>Metadata</h3>
-      </div>
-      <div class="panel-body" id="metadataBody">
-        <div class="form-row">
-          <label for="metaTitle">Title</label>
-          <input type="text" id="metaTitle" placeholder="Document title" />
+  <div class="layout">
+    <aside class="sidebar">
+      <!-- Files Section -->
+      <div class="sidebar-section">
+        <div class="section-header" id="filesHeader">
+          <span>Files <span class="badge" id="fileCount">0</span></span>
+          <svg class="chevron" viewBox="0 0 16 16"><path d="M6 12l4-4-4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
         </div>
-        <div class="form-row">
-          <label for="metaDescription">Description</label>
-          <textarea id="metaDescription" placeholder="Document description"></textarea>
-        </div>
-        <div class="form-row">
-          <label for="metaAuthor">Author</label>
-          <input type="text" id="metaAuthor" placeholder="Author name" />
-        </div>
-        <div class="form-row">
-          <label for="metaRoot">Root File</label>
-          <select id="metaRoot"></select>
-        </div>
-        <div class="form-row">
-          <label for="metaTags">Tags (comma-separated)</label>
-          <input type="text" id="metaTags" placeholder="tag1, tag2, tag3" />
-        </div>
-        <div class="btn-row">
-          <button type="button" id="saveMetadataBtn">Save Metadata</button>
+        <div class="section-body" id="filesBody">
+          <div class="section-actions">
+            <button type="button" id="addFileBtn" class="small">+ Add File</button>
+          </div>
+          <ul class="file-list" id="fileList"></ul>
         </div>
       </div>
-    </div>
 
-    <!-- Media Panel -->
-    <div class="panel">
-      <div class="panel-header collapsed" id="mediaHeader">
-        <svg class="chevron" viewBox="0 0 16 16"><path d="M6 12l4-4-4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
-        <h3>Media (<span id="mediaCount">0</span>)</h3>
-      </div>
-      <div class="panel-body" id="mediaBody">
-        <div class="btn-row" style="margin-top:0;margin-bottom:12px;">
-          <button type="button" id="addMediaBtn">+ Add Media</button>
+      <!-- Media Section -->
+      <div class="sidebar-section">
+        <div class="section-header" id="mediaHeader">
+          <span>Media <span class="badge" id="mediaCount">0</span></span>
+          <svg class="chevron" viewBox="0 0 16 16"><path d="M6 12l4-4-4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
         </div>
-        <div class="media-grid" id="mediaGrid"></div>
+        <div class="section-body" id="mediaBody">
+          <div class="section-actions">
+            <button type="button" id="addMediaBtn" class="small">+ Add Media</button>
+          </div>
+          <div class="media-grid" id="mediaGrid"></div>
+        </div>
       </div>
-    </div>
 
-    <!-- Content Preview -->
-    <div id="content"></div>
-  </main>
+      <!-- Metadata Section -->
+      <div class="sidebar-section">
+        <div class="section-header collapsed" id="metadataHeader">
+          <span>Metadata</span>
+          <svg class="chevron" viewBox="0 0 16 16"><path d="M6 12l4-4-4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+        </div>
+        <div class="section-body" id="metadataBody">
+          <div class="form-row">
+            <label for="metaTitle">Title</label>
+            <input type="text" id="metaTitle" placeholder="Document title" />
+          </div>
+          <div class="form-row">
+            <label for="metaDescription">Description</label>
+            <textarea id="metaDescription" placeholder="Description"></textarea>
+          </div>
+          <div class="form-row">
+            <label for="metaAuthor">Author</label>
+            <input type="text" id="metaAuthor" placeholder="Author" />
+          </div>
+          <div class="form-row">
+            <label for="metaRoot">Root File</label>
+            <select id="metaRoot"></select>
+          </div>
+          <div class="form-row">
+            <label for="metaTags">Tags</label>
+            <input type="text" id="metaTags" placeholder="tag1, tag2" />
+          </div>
+          <div class="btn-row">
+            <button type="button" id="saveMetadataBtn" class="small">Save Metadata</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <div id="error" class="error" style="display:none"></div>
+      <div id="previewView">
+        <div id="content"></div>
+      </div>
+      <div id="editorView">
+        <div class="editor-toolbar">
+          <span class="file-path" id="editorFilePath"></span>
+          <button type="button" id="discardBtn" class="secondary small">Discard</button>
+          <button type="button" id="saveBtn" class="small">Save</button>
+        </div>
+        <div class="editor-container">
+          <textarea id="markdownEditor" placeholder="Enter markdown content..."></textarea>
+        </div>
+        <div class="editor-status">
+          <span id="editorStatus"></span>
+          <div class="editor-actions">
+            <span id="charCount">0 characters</span>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-
     const state = vscode.getState() || {};
 
-    const fileSelect = document.getElementById('fileSelect');
-    const copyBtn = document.getElementById('copyBtn');
-    const editBtn = document.getElementById('editBtn');
+    // Elements
     const content = document.getElementById('content');
     const error = document.getElementById('error');
     const docTitle = document.getElementById('docTitle');
     const docDesc = document.getElementById('docDesc');
-
-    // Metadata elements
-    const metadataHeader = document.getElementById('metadataHeader');
+    const fileList = document.getElementById('fileList');
+    const fileCount = document.getElementById('fileCount');
+    const mediaGrid = document.getElementById('mediaGrid');
+    const mediaCount = document.getElementById('mediaCount');
     const metaTitle = document.getElementById('metaTitle');
     const metaDescription = document.getElementById('metaDescription');
     const metaAuthor = document.getElementById('metaAuthor');
     const metaRoot = document.getElementById('metaRoot');
     const metaTags = document.getElementById('metaTags');
-    const saveMetadataBtn = document.getElementById('saveMetadataBtn');
+    const previewView = document.getElementById('previewView');
+    const editorView = document.getElementById('editorView');
+    const markdownEditor = document.getElementById('markdownEditor');
+    const editorFilePath = document.getElementById('editorFilePath');
+    const editorStatus = document.getElementById('editorStatus');
+    const charCount = document.getElementById('charCount');
+    const previewToggle = document.getElementById('previewToggle');
+    const editToggle = document.getElementById('editToggle');
 
-    // Media elements
-    const mediaHeader = document.getElementById('mediaHeader');
-    const mediaCount = document.getElementById('mediaCount');
-    const mediaGrid = document.getElementById('mediaGrid');
-    const addMediaBtn = document.getElementById('addMediaBtn');
+    let currentFiles = [];
+    let currentPath = '';
+    let rootPath = '';
+    let isEditMode = false;
+    let originalContent = '';
+    let isModified = false;
 
-    // Panel toggle
-    document.querySelectorAll('.panel-header').forEach(header => {
-      header.addEventListener('click', () => {
-        header.classList.toggle('collapsed');
-      });
+    // Section toggle
+    document.querySelectorAll('.section-header').forEach(header => {
+      header.addEventListener('click', () => header.classList.toggle('collapsed'));
     });
 
     function setError(message) {
-      if (!message) {
-        error.style.display = 'none';
-        error.textContent = '';
-        return;
-      }
-      error.style.display = 'block';
-      error.textContent = message;
-    }
-
-    function setFiles(files, currentPath) {
-      const prev = fileSelect.value;
-      fileSelect.innerHTML = '';
-      metaRoot.innerHTML = '';
-      for (const path of files || []) {
-        const opt = document.createElement('option');
-        opt.value = path;
-        opt.textContent = path;
-        fileSelect.appendChild(opt);
-
-        const rootOpt = document.createElement('option');
-        rootOpt.value = path;
-        rootOpt.textContent = path;
-        metaRoot.appendChild(rootOpt);
-      }
-      const desired = currentPath || prev || (files && files[0]) || '';
-      if (desired) {
-        fileSelect.value = desired;
-      }
-    }
-
-    function setMetadata(metadata) {
-      if (!metadata) return;
-      metaTitle.value = metadata.title || '';
-      metaDescription.value = metadata.description || '';
-      metaAuthor.value = metadata.author || '';
-      if (metadata.root) metaRoot.value = metadata.root;
-      metaTags.value = Array.isArray(metadata.tags) ? metadata.tags.join(', ') : '';
-    }
-
-    function setMediaItems(items) {
-      mediaCount.textContent = items ? items.length : 0;
-      mediaGrid.innerHTML = '';
-      if (!items || items.length === 0) {
-        mediaGrid.innerHTML = '<p style="opacity:0.6;font-size:12px;">No media items</p>';
-        return;
-      }
-      for (const item of items) {
-        const div = document.createElement('div');
-        div.className = 'media-item';
-
-        if (item.dataUri) {
-          const img = document.createElement('img');
-          img.src = item.dataUri;
-          img.alt = item.id;
-          div.appendChild(img);
-        } else {
-          const placeholder = document.createElement('div');
-          placeholder.className = 'placeholder';
-          placeholder.textContent = item.mimeType || 'binary';
-          div.appendChild(placeholder);
-        }
-
-        const info = document.createElement('div');
-        info.className = 'info';
-        info.innerHTML = '<strong>' + escapeHtml(item.id) + '</strong><br/>' +
-          (item.path ? escapeHtml(item.path) + '<br/>' : '') +
-          formatBytes(item.size);
-        div.appendChild(info);
-
-        const actions = document.createElement('div');
-        actions.className = 'actions';
-
-        const replaceBtn = document.createElement('button');
-        replaceBtn.type = 'button';
-        replaceBtn.textContent = 'Replace';
-        replaceBtn.onclick = () => vscode.postMessage({ type: 'replaceMedia', id: item.id });
-        actions.appendChild(replaceBtn);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.textContent = 'Remove';
-        removeBtn.style.background = 'var(--vscode-inputValidation-errorBackground, #5a1d1d)';
-        removeBtn.onclick = () => vscode.postMessage({ type: 'removeMedia', id: item.id });
-        actions.appendChild(removeBtn);
-
-        div.appendChild(actions);
-        mediaGrid.appendChild(div);
-      }
+      error.style.display = message ? 'block' : 'none';
+      error.textContent = message || '';
     }
 
     function escapeHtml(str) {
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     function formatBytes(bytes) {
@@ -1089,21 +1512,216 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
     }
 
-    fileSelect.addEventListener('change', () => {
-      setError(null);
-      vscode.setState({ selectedPath: fileSelect.value });
-      vscode.postMessage({ type: 'select', path: fileSelect.value });
+    function updateEditorStatus() {
+      const len = markdownEditor.value.length;
+      charCount.textContent = len + ' character' + (len !== 1 ? 's' : '');
+      isModified = markdownEditor.value !== originalContent;
+      if (isModified) {
+        editorStatus.innerHTML = '<span class="modified">● Modified</span>';
+      } else {
+        editorStatus.textContent = '';
+      }
+    }
+
+    function switchToPreview() {
+      if (isModified) {
+        // Could prompt to save, but for simplicity just switch
+      }
+      isEditMode = false;
+      previewView.classList.remove('hidden');
+      editorView.classList.remove('active');
+      previewToggle.classList.add('active');
+      editToggle.classList.remove('active');
+    }
+
+    function switchToEdit() {
+      isEditMode = true;
+      previewView.classList.add('hidden');
+      editorView.classList.add('active');
+      previewToggle.classList.remove('active');
+      editToggle.classList.add('active');
+      editorFilePath.textContent = currentPath;
+      vscode.postMessage({ type: 'getMarkdownContent', path: currentPath });
+    }
+
+    function setFiles(files, selected, root) {
+      currentFiles = files || [];
+      currentPath = selected || currentFiles[0] || '';
+      rootPath = root || '';
+      fileCount.textContent = currentFiles.length;
+      fileList.innerHTML = '';
+      metaRoot.innerHTML = '';
+
+      if (currentFiles.length === 0) {
+        fileList.innerHTML = '<li class="empty-state">No files yet</li>';
+        return;
+      }
+
+      for (const path of currentFiles) {
+        // File list item
+        const li = document.createElement('li');
+        li.className = 'file-item' + (path === currentPath ? ' selected' : '') + (path === rootPath ? ' root-file' : '');
+        li.innerHTML = \`
+          <svg class="file-icon" viewBox="0 0 16 16"><path d="M4 0h5.5L14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 0v4.5H14L9.5 0zM4.5 12.5a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5z"/></svg>
+          <span class="file-name">\${escapeHtml(path)}</span>
+          <span class="file-actions">
+            <button type="button" title="Edit" data-action="edit" data-path="\${escapeHtml(path)}">
+              <svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.638-.638l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/></svg>
+            </button>
+            <button type="button" title="Delete" data-action="delete" data-path="\${escapeHtml(path)}">
+              <svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill="currentColor" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+            </button>
+          </span>
+        \`;
+        li.addEventListener('click', (e) => {
+          if (e.target.closest('button')) return;
+          // If in edit mode and modified, confirm before switching
+          if (isEditMode && isModified) {
+            if (!confirm('You have unsaved changes. Discard them?')) return;
+          }
+          vscode.postMessage({ type: 'select', path });
+        });
+        fileList.appendChild(li);
+
+        // Root select option
+        const opt = document.createElement('option');
+        opt.value = path;
+        opt.textContent = path;
+        metaRoot.appendChild(opt);
+      }
+
+      // Update root select
+      if (rootPath) metaRoot.value = rootPath;
+    }
+
+    function setMetadata(metadata) {
+      if (!metadata) return;
+      metaTitle.value = metadata.title || '';
+      metaDescription.value = metadata.description || '';
+      metaAuthor.value = metadata.author || '';
+      if (metadata.root) {
+        rootPath = metadata.root;
+        metaRoot.value = metadata.root;
+      }
+      metaTags.value = Array.isArray(metadata.tags) ? metadata.tags.join(', ') : '';
+    }
+
+    function setMediaItems(items) {
+      mediaCount.textContent = items ? items.length : 0;
+      mediaGrid.innerHTML = '';
+      if (!items || items.length === 0) {
+        mediaGrid.innerHTML = '<div class="empty-state">No media</div>';
+        return;
+      }
+      for (const item of items) {
+        const div = document.createElement('div');
+        div.className = 'media-item';
+        div.innerHTML = \`
+          \${item.dataUri 
+            ? \`<img src="\${item.dataUri}" alt="\${escapeHtml(item.id)}" />\`
+            : \`<div class="placeholder">\${escapeHtml(item.mimeType || 'binary')}</div>\`
+          }
+          <div class="info">\${escapeHtml(item.id)}<br/>\${formatBytes(item.size)}</div>
+          <div class="actions">
+            <button type="button" class="small secondary" data-action="replace" data-id="\${escapeHtml(item.id)}">Replace</button>
+            <button type="button" class="small danger" data-action="remove" data-id="\${escapeHtml(item.id)}">✕</button>
+          </div>
+        \`;
+        mediaGrid.appendChild(div);
+      }
+    }
+
+    // Event delegation for file actions
+    fileList.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const path = btn.dataset.path;
+      if (action === 'edit') {
+        // Switch to inline edit for that file
+        if (isEditMode && isModified && currentPath !== path) {
+          if (!confirm('You have unsaved changes. Discard them?')) return;
+        }
+        vscode.postMessage({ type: 'select', path });
+        setTimeout(() => switchToEdit(), 100);
+      } else if (action === 'delete') {
+        vscode.postMessage({ type: 'deleteMarkdown', path });
+      }
     });
 
-    copyBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'copy', path: fileSelect.value });
+    // Event delegation for media actions
+    mediaGrid.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const id = btn.dataset.id;
+      if (action === 'replace') {
+        vscode.postMessage({ type: 'replaceMedia', id });
+      } else if (action === 'remove') {
+        vscode.postMessage({ type: 'removeMedia', id });
+      }
     });
 
-    editBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'edit', path: fileSelect.value });
+    // Button handlers
+    document.getElementById('copyBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'copy', path: currentPath });
     });
 
-    saveMetadataBtn.addEventListener('click', () => {
+    document.getElementById('editExternalBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'editExternal', path: currentPath });
+    });
+
+    previewToggle.addEventListener('click', () => {
+      if (!isEditMode) return;
+      if (isModified) {
+        if (!confirm('You have unsaved changes. Discard them?')) return;
+      }
+      switchToPreview();
+    });
+
+    editToggle.addEventListener('click', () => {
+      if (isEditMode) return;
+      switchToEdit();
+    });
+
+    document.getElementById('saveBtn').addEventListener('click', () => {
+      if (!currentPath) return;
+      vscode.postMessage({ type: 'saveContent', path: currentPath, content: markdownEditor.value });
+      originalContent = markdownEditor.value;
+      updateEditorStatus();
+    });
+
+    document.getElementById('discardBtn').addEventListener('click', () => {
+      if (isModified) {
+        if (!confirm('Discard all changes?')) return;
+      }
+      markdownEditor.value = originalContent;
+      updateEditorStatus();
+    });
+
+    markdownEditor.addEventListener('input', updateEditorStatus);
+
+    // Handle Ctrl+S in editor
+    markdownEditor.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (currentPath) {
+          vscode.postMessage({ type: 'saveContent', path: currentPath, content: markdownEditor.value });
+          originalContent = markdownEditor.value;
+          updateEditorStatus();
+        }
+      }
+    });
+
+    document.getElementById('addFileBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'addMarkdown' });
+    });
+
+    document.getElementById('addMediaBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'addMedia' });
+    });
+
+    document.getElementById('saveMetadataBtn').addEventListener('click', () => {
       const tagsStr = metaTags.value.trim();
       const tags = tagsStr ? tagsStr.split(',').map(t => t.trim()).filter(Boolean) : undefined;
       vscode.postMessage({
@@ -1118,32 +1736,34 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
       });
     });
 
-    addMediaBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'addMedia' });
-    });
-
-    // Ask extension to render using persisted selection (if any).
+    // Init
     vscode.postMessage({ type: 'ready', selectedPath: state.selectedPath });
 
+    // Message handler
     window.addEventListener('message', (event) => {
       const msg = event.data;
+      
+      // Handle markdown content for editor
+      if (msg && msg.type === 'markdownContent') {
+        markdownEditor.value = msg.content || '';
+        originalContent = msg.content || '';
+        editorFilePath.textContent = msg.path || currentPath;
+        updateEditorStatus();
+        markdownEditor.focus();
+        return;
+      }
+
       if (!msg || msg.type !== 'render') return;
 
-      if (msg.title) docTitle.textContent = msg.title;
-      else docTitle.textContent = 'MDOCX';
-
+      docTitle.textContent = msg.title || 'MDOCX';
       docDesc.textContent = msg.description || '';
 
       if (Array.isArray(msg.fileList)) {
-        setFiles(msg.fileList, msg.path);
+        setFiles(msg.fileList, msg.path, msg.metadata?.root);
       }
 
       if (msg.metadata) {
         setMetadata(msg.metadata);
-        // Sync metaRoot after files are populated
-        if (msg.metadata.root) {
-          metaRoot.value = msg.metadata.root;
-        }
       }
 
       if (msg.mediaItems) {
@@ -1152,13 +1772,16 @@ export class MdocxPreviewEditorProvider implements vscode.CustomReadonlyEditorPr
 
       if (msg.path) {
         vscode.setState({ selectedPath: msg.path });
+        // If in edit mode, update the editor content
+        if (isEditMode && msg.markdown) {
+          markdownEditor.value = msg.markdown;
+          originalContent = msg.markdown;
+          editorFilePath.textContent = msg.path;
+          updateEditorStatus();
+        }
       }
 
-      if (msg.error) {
-        setError(msg.error);
-      } else {
-        setError(null);
-      }
+      setError(msg.error || null);
 
       if (typeof msg.html === 'string') {
         content.innerHTML = msg.html;

@@ -2,7 +2,7 @@
   "name": "mdocx-vscode",
   "displayName": "MDOCX",
   "description": "Preview, edit, and manage MDOCX (MarkDown Open Container eXchange) files in VS Code.",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "publisher": "logicossoftware",
   "author": {
     "name": "MHJ Wiggers / Logicos Software"
@@ -39,6 +39,21 @@
   "preview": true,
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "mdocx.createNew",
+        "title": "MDOCX: Create New MDOCX File",
+        "category": "MDOCX"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "mdocx.createNew",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "MDOCX",
       "properties": {
