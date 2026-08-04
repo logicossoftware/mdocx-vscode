@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
-import { Buffer } from 'buffer';
-import { TextDecoder, TextEncoder } from 'util';
+import { readDocument, updateDocument } from './mdocxDocument.js';
 
 /**
  * Virtual FileSystemProvider for embedded markdown files within MDOCX containers.
@@ -81,10 +80,12 @@ export class MdocxFileSystemProvider implements vscode.FileSystemProvider {
       if (!file) {
         throw vscode.FileSystemError.FileNotFound(uri);
       }
+      // Mirror the container's timestamps so VS Code does not see phantom edits.
+      const containerStat = await vscode.workspace.fs.stat(mdocxUri);
       return {
         type: vscode.FileType.File,
-        ctime: 0,
-        mtime: Date.now(),
+        ctime: containerStat.ctime,
+        mtime: containerStat.mtime,
         size: file.content.byteLength
       };
     } catch (e) {
@@ -135,26 +136,13 @@ export class MdocxFileSystemProvider implements vscode.FileSystemProvider {
     }
     const { mdocxUri, embeddedPath } = parsed;
 
-    const bytes = await vscode.workspace.fs.readFile(mdocxUri);
-    const { readMdocx, writeMdocxAsync } = await import('ts-mdocx');
-    const doc = await readMdocx(bytes);
-
-    const file = doc.markdown.files.find((f: { path: string }) => f.path === embeddedPath);
-    if (!file) {
-      throw vscode.FileSystemError.FileNotFound(uri);
-    }
-
-    // Update the content
-    file.content = content;
-
-    // Re-write the MDOCX
-    const newBytes = await writeMdocxAsync(doc.markdown, doc.media, {
-      metadata: doc.metadata,
-      markdownCompression: 'zip',
-      mediaCompression: 'zip'
+    await updateDocument(mdocxUri, (doc) => {
+      const file = doc.markdown.files.find((f) => f.path === embeddedPath);
+      if (!file) {
+        throw vscode.FileSystemError.FileNotFound(uri);
+      }
+      file.content = content;
     });
-
-    await vscode.workspace.fs.writeFile(mdocxUri, newBytes);
 
     this._onDidChangeFile.fire([{ type: vscode.FileChangeType.Changed, uri }]);
   }
@@ -174,10 +162,8 @@ export class MdocxFileSystemProvider implements vscode.FileSystemProvider {
     embeddedPath: string
   ): Promise<{ path: string; content: Uint8Array } | undefined> {
     try {
-      const bytes = await vscode.workspace.fs.readFile(mdocxUri);
-      const { readMdocx } = await import('ts-mdocx');
-      const doc = await readMdocx(bytes);
-      return doc.markdown.files.find((f: { path: string }) => f.path === embeddedPath);
+      const doc = await readDocument(mdocxUri);
+      return doc.markdown.files.find((f) => f.path === embeddedPath);
     } catch {
       return undefined;
     }

@@ -2,7 +2,7 @@
   "name": "mdocx-vscode",
   "displayName": "MDOCX",
   "description": "Preview, edit, and manage MDOCX (MarkDown Open Container eXchange) files in VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "logicossoftware",
   "author": {
     "name": "MHJ Wiggers / Logicos Software"
@@ -42,7 +42,22 @@
     "commands": [
       {
         "command": "mdocx.createNew",
-        "title": "MDOCX: Create New MDOCX File",
+        "title": "Create New MDOCX File",
+        "category": "MDOCX"
+      },
+      {
+        "command": "mdocx.createFromFolder",
+        "title": "Create MDOCX from Folder",
+        "category": "MDOCX"
+      },
+      {
+        "command": "mdocx.extractToFolder",
+        "title": "Extract MDOCX to Folder",
+        "category": "MDOCX"
+      },
+      {
+        "command": "mdocx.exportHtml",
+        "title": "Export MDOCX as HTML",
         "category": "MDOCX"
       }
     ],
@@ -50,7 +65,23 @@
       "explorer/context": [
         {
           "command": "mdocx.createNew",
-          "group": "navigation"
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@10"
+        },
+        {
+          "command": "mdocx.createFromFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@11"
+        },
+        {
+          "command": "mdocx.extractToFolder",
+          "when": "resourceExtname == .mdocx",
+          "group": "navigation@10"
+        },
+        {
+          "command": "mdocx.exportHtml",
+          "when": "resourceExtname == .mdocx",
+          "group": "navigation@11"
         }
       ]
     },
@@ -61,7 +92,12 @@
           "type": "number",
           "default": 26214400,
           "minimum": 1,
-          "description": "Maximum size (bytes) of a single embedded media item to inline into the preview as a data URI. Larger items will not be inlined." 
+          "description": "Maximum size (bytes) of a single embedded media item to inline into the preview as a data URI. Larger items will not be inlined."
+        },
+        "mdocx.confirmDelete": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before deleting markdown files or media from an MDOCX container."
         }
       }
     },

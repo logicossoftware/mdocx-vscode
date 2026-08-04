@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+- **Split view** - New Preview / Split / Edit mode switcher. Split mode shows the editor next to a live preview that re-renders as you type (embedded media resolves in the live preview too).
+- **Document outline** - Sidebar panel listing the headings of the current document; click to jump. Headings now get stable anchor ids and hover anchor links.
+- **Full-text search** - Search across every markdown file in the container with highlighted, clickable results (`Ctrl+F` inside the preview).
+- **File filter** - Quickly narrow the file list by name.
+- **Rename and duplicate files** - Rename or duplicate embedded markdown files from the file list.
+- **Set root file** - Mark any file as the container root directly from the file list.
+- **Markdown formatting toolbar** - Bold, italic, inline code, heading, link, lists, quote, table, and code block helpers with `Ctrl+B` / `Ctrl+I` / `Ctrl+K` shortcuts, plus `Tab` indentation support.
+- **Insert media references** - Insert a markdown reference to any embedded media item at the cursor.
+- **Export media** - Save any embedded media item back to disk.
+- **Unused media detection** - Media not referenced by any markdown file is flagged in the sidebar.
+- **New commands**
+  - `MDOCX: Create MDOCX from Folder` - packs a folder of markdown and media into a container.
+  - `MDOCX: Extract MDOCX to Folder` - unpacks markdown, media, and metadata to disk.
+  - `MDOCX: Export MDOCX as HTML` - writes a self-contained HTML file (media inlined) for a single document or all documents combined.
+- **Document statistics** - Word counts per file plus totals for files, words, and media size.
+- **Cross-document links** - Links to other markdown files inside the container now navigate the preview instead of being dropped.
+- **Cross-document completions** - Autocomplete now suggests other embedded markdown files alongside media references.
+- **Setting** `mdocx.confirmDelete` to disable delete confirmations.
+- **Collapsible sidebar** and toast notifications for in-preview feedback.
+
+### Changed
+- Rendering improvements: GFM tables, task lists, blockquotes, horizontal rules, and code blocks are styled; code blocks show their language and a copy button.
+- Missing or unresolvable images now render a visible placeholder instead of disappearing silently.
+- Editor status bar shows word count, character count, and estimated reading time.
+- Explorer context menu entries are now scoped (create commands on folders, extract/export on `.mdocx` files).
+- Media ids are derived from the file name instead of a timestamp suffix.
+
+### Fixed
+- MDOCX contents are now cached and invalidated by file timestamp, so switching files, searching, and previewing no longer re-parse the whole container each time.
+- Writes made by the extension no longer trigger a redundant file-watcher re-render (which could clobber in-progress edits).
+- Errors from add / rename / delete / media operations are surfaced as notifications instead of failing silently.
+- New and renamed file paths are validated (extension, duplicates, and `..` path traversal).
+- Editing an embedded file through the virtual filesystem now invalidates the preview cache, and reports the container's real timestamps instead of `Date.now()`, which caused phantom "file changed" prompts.
+- Extracting a container rejects unsafe paths that would escape the target folder.
+- MIME types are inferred consistently from extension and file signature for previews, exports, and thumbnails.
+
 ## 0.1.0
 
 ### Added

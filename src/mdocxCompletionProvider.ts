@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { MdocxFileSystemProvider } from './mdocxFileSystemProvider.js';
+import { inferMimeType, readDocument } from './mdocxDocument.js';
 
 /**
  * Provides autocomplete suggestions for media references when editing
@@ -59,12 +60,22 @@ export class MdocxCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     try {
-      const mediaItems = await this.getMediaItems(parsed.mdocxUri);
-      if (!mediaItems || mediaItems.length === 0) {
+      const { mediaItems, markdownPaths } = await this.getDocumentEntries(parsed.mdocxUri);
+      if (mediaItems.length === 0 && markdownPaths.length === 0) {
         return undefined;
       }
 
       const completions: vscode.CompletionItem[] = [];
+
+      for (const other of markdownPaths) {
+        if (other === parsed.embeddedPath) continue;
+        const item = new vscode.CompletionItem(other, vscode.CompletionItemKind.File);
+        item.detail = 'Markdown document in this MDOCX';
+        item.documentation = new vscode.MarkdownString(`Links to the embedded document **${other}**.`);
+        item.insertText = other;
+        item.sortText = '0_doc_' + other;
+        completions.push(item);
+      }
 
       for (const item of mediaItems) {
         // Create completion for path-based reference
@@ -101,7 +112,6 @@ export class MdocxCompletionProvider implements vscode.CompletionItemProvider {
       if (/!\[$/.test(textBefore)) {
         for (const item of mediaItems) {
           if (item.mimeType?.startsWith('image/')) {
-            const fullSyntax = `[${item.id}](${item.path || `mdocx://media/${item.id}`})`;
             const snippetCompletion = new vscode.CompletionItem(
               `Image: ${item.id}`,
               vscode.CompletionItemKind.Snippet
@@ -125,20 +135,22 @@ export class MdocxCompletionProvider implements vscode.CompletionItemProvider {
     }
   }
 
-  private async getMediaItems(mdocxUri: vscode.Uri): Promise<MediaItemInfo[]> {
+  private async getDocumentEntries(
+    mdocxUri: vscode.Uri
+  ): Promise<{ mediaItems: MediaItemInfo[]; markdownPaths: string[] }> {
     try {
-      const bytes = await vscode.workspace.fs.readFile(mdocxUri);
-      const { readMdocx } = await import('ts-mdocx');
-      const doc = await readMdocx(bytes);
-
-      return (doc.media.items || []).map((item: any) => ({
-        id: item.id,
-        path: item.path,
-        mimeType: item.mimeType,
-        size: item.data?.byteLength ?? 0
-      }));
+      const doc = await readDocument(mdocxUri);
+      return {
+        mediaItems: doc.media.items.map((item) => ({
+          id: item.id,
+          path: item.path,
+          mimeType: inferMimeType(item),
+          size: item.data?.byteLength ?? 0
+        })),
+        markdownPaths: doc.markdown.files.map((file) => file.path)
+      };
     } catch {
-      return [];
+      return { mediaItems: [], markdownPaths: [] };
     }
   }
 
